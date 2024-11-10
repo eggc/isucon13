@@ -38,7 +38,10 @@ install-memcached:
 
 set-nginxconf:
 	sudo rsync -rv conf/nginx.conf /etc/nginx/
+	sudo rsync -rv conf/sites-enabled/* /etc/nginx/sites-enabled/
+
 	sudo chown ${NGINX_USER}:${NGINX_GROUP} /etc/nginx/nginx.conf
+	sudo chown ${NGINX_USER}:${NGINX_GROUP} /etc/nginx/sites-enabled/*
 
 set-mysqlconf:
 	sudo rsync -rv conf/mysqld.cnf /etc/mysql/mysql.conf.d
@@ -46,7 +49,10 @@ set-mysqlconf:
 
 get-nginxconf:
 	sudo rsync -rv /etc/nginx/nginx.conf conf/
+	sudo rsync -rv /etc/nginx/sites-enabled/* conf/sites-enabled/
+
 	sudo chown ${ISUCON_USER}:${ISUCON_GROUP} conf/nginx.conf
+	sudo chown ${ISUCON_USER}:${ISUCON_GROUP} conf/sites-enabled/*
 
 get-mysqlconf:
 	sudo rsync -rv /etc/mysql/mysql.conf.d/mysqld.cnf conf/
