@@ -1,0 +1,11 @@
+local/
+go/
+bench
+\.*
+
+webapp/go/
+webapp/node/
+webapp/perl/
+webapp/php/
+webapp/python/
+webapp/rust/
