@@ -17,6 +17,7 @@ TRUNCATE TABLE users;
 -- CREATE INDEX user_id_index ON livestreams(user_id);
 -- CREATE INDEX livestream_id_index ON reactions(livestream_id)
 -- CREATE INDEX user_id_index ON themes(user_id)
+-- CREATE INDEX start_at_and_end_at_index ON reservation_slots(start_at, end_at)
 
 ALTER TABLE `themes` auto_increment = 1;
 ALTER TABLE `icons` auto_increment = 1;
