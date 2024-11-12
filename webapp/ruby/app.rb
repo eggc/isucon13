@@ -793,7 +793,7 @@ module Isupipe
         tx.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
       end
 
-      if image && Digest::SHA256.hexdigest(image[:image]) == request.env["HTTP_IF_NONE_MATCH"]
+      if image && "\"#{Digest::SHA256.hexdigest(image[:image])}\"" == request.env["HTTP_IF_NONE_MATCH"]
         status 304
         return body nil
       end
