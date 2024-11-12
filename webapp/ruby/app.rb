@@ -191,19 +191,8 @@ module Isupipe
           end
         end
 
-        icon_models = tx.xquery("SELECT user_id, image FROM icons WHERE user_id IN (#{user_ids})").to_h do
-          [_1[:user_id], _1]
-        end
-
         user_models.map do |user_model|
           user_id = user_model.fetch(:id)
-          icon_model = icon_models[user_id]
-          image =
-            if icon_model
-              icon_model.fetch(:image)
-            else
-              File.binread(FALLBACK_IMAGE)
-            end
 
           {
             id: user_id,
@@ -211,22 +200,13 @@ module Isupipe
             display_name: user_model.fetch(:display_name),
             description: user_model.fetch(:description),
             theme: theme_models ? theme_models[user_id].slice(:id, :dark_mode) : {},
-            icon_hash: Digest::SHA256.hexdigest(image),
+            icon_hash: user_model.fetch(:icon_hash),
           }
         end
       end
 
       def fill_user_response(tx, user_model, with_theme: true)
         theme_model = tx.xquery('SELECT * FROM themes WHERE user_id = ?', user_model.fetch(:id)).first if with_theme
-        icon_model = tx.xquery('SELECT image FROM icons WHERE user_id = ?', user_model.fetch(:id)).first
-        image =
-          if icon_model
-            icon_model.fetch(:image)
-          else
-            File.binread(FALLBACK_IMAGE)
-          end
-        icon_hash = Digest::SHA256.hexdigest(image)
-
         theme = with_theme ? {
           id: theme_model.fetch(:id),
           dark_mode: theme_model.fetch(:dark_mode),
@@ -238,7 +218,7 @@ module Isupipe
           display_name: user_model.fetch(:display_name),
           description: user_model.fetch(:description),
           theme: theme,
-          icon_hash:,
+          icon_hash: user_model.fetch(:icon_hash),
         }
       end
     end
