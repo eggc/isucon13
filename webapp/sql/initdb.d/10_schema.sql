@@ -104,3 +104,11 @@ CREATE TABLE `reactions` (
   `emoji_name` VARCHAR(255) NOT NULL,
   `created_at` BIGINT NOT NULL
 ) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE INDEX idx_user_id ON icons(user_id);
+CREATE INDEX idx_livestream_id ON livestream_tags(livestream_id);
+CREATE INDEX livestream_id_index ON livecomments(livestream_id);
+CREATE INDEX user_id_index ON livestreams(user_id);
+CREATE INDEX livestream_id_index ON reactions(livestream_id);
+CREATE INDEX user_id_index ON themes(user_id);
+CREATE INDEX start_at_and_end_at_index ON reservation_slots(start_at, end_at);

@@ -11,14 +11,6 @@ TRUNCATE TABLE livecomments;
 TRUNCATE TABLE livestreams;
 TRUNCATE TABLE users;
 
--- CREATE INDEX idx_user_id ON icons(user_id);
--- CREATE INDEX idx_livestream_id ON livestream_tags(livestream_id);
--- CREATE INDEX livestream_id_index ON livecomments(livestream_id);
--- CREATE INDEX user_id_index ON livestreams(user_id);
--- CREATE INDEX livestream_id_index ON reactions(livestream_id)
--- CREATE INDEX user_id_index ON themes(user_id)
--- CREATE INDEX start_at_and_end_at_index ON reservation_slots(start_at, end_at)
-
 ALTER TABLE `themes` auto_increment = 1;
 ALTER TABLE `icons` auto_increment = 1;
 ALTER TABLE `reservation_slots` auto_increment = 1;
