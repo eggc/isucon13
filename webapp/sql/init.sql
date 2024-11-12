@@ -12,6 +12,7 @@ TRUNCATE TABLE livestreams;
 TRUNCATE TABLE users;
 
 -- CREATE INDEX idx_user_id ON icons(user_id);
+-- CREATE INDEX idx_livestream_id ON livestream_tags(livestream_id);
 
 ALTER TABLE `themes` auto_increment = 1;
 ALTER TABLE `icons` auto_increment = 1;
