@@ -442,3 +442,264 @@ explain SELECT IFNULL(SUM(l2.tip), 0) FROM users u INNER JOIN livestreams l ON l
 +----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
 3 rows in set, 1 warning (0.00 sec)
 ```
+
+```
+2024-11-12T08:54:04.726Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.27903132s
+2024-11-12T08:54:04.727Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-12T08:54:04.727Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-12T08:54:04.727Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-12T08:54:04.727Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-12T08:54:04.727Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 190}
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 101 回成功, 1 回失敗
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 685 回成功
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 743 回成功
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 131 回成功
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 54 回成功, 3 回失敗
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 104 回成功
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 190 回成功
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 1 回失敗
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 3 回失敗
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 73736
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 0
+2024-11-12T08:54:04.727Z	info	staff-logger	bench/bench.go:335	スコア: 37145
+```
+
+まだ mysqld が支配的なんだけど時々 puma の worker も上位に来るようになってきた。
+
+## reactions のインデックス
+
+```sql
+SELECT COUNT(*) FROM users u
+INNER JOIN livestreams l ON l.user_id = u.id
+INNER JOIN reactions r ON r.livestream_id = l.id
+WHERE u.id = '585'\G
+```
+
+やはりインデックスかかってない
+
+```
+EXPLAIN SELECT COUNT(*) FROM users u INNER JOIN livestreams l ON l.user_id = u.id INNER JOIN reactions r ON r.livestream_id = l.id WHERE u.id = '585';
++----+-------------+-------+------------+--------+-----------------------+---------+---------+-------------------------+------+----------+-------------+
+| id | select_type | table | partitions | type   | possible_keys         | key     | key_len | ref                     | rows | filtered | Extra       |
++----+-------------+-------+------------+--------+-----------------------+---------+---------+-------------------------+------+----------+-------------+
+|  1 | SIMPLE      | u     | NULL       | const  | PRIMARY               | PRIMARY | 8       | const                   |    1 |   100.00 | Using index |
+|  1 | SIMPLE      | r     | NULL       | ALL    | NULL                  | NULL    | NULL    | NULL                    | 2969 |   100.00 | NULL        |
+|  1 | SIMPLE      | l     | NULL       | eq_ref | PRIMARY,user_id_index | PRIMARY | 8       | isupipe.r.livestream_id |    1 |     5.00 | Using where |
++----+-------------+-------+------------+--------+-----------------------+---------+---------+-------------------------+------+----------+-------------+
+3 rows in set, 1 warning (0.00 sec)
+```
+
+```sql
+CREATE INDEX livestream_id_index ON reactions(livestream_id)
+```
+
+改善した。
+
+```
+explain SELECT COUNT(*) FROM users u INNER JOIN livestreams l ON l.user_id = u.id INNER JOIN reactions r ON r.livestream_id = l.id WHERE u.id = '585';
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+| id | select_type | table | partitions | type  | possible_keys         | key                 | key_len | ref          | rows | filtered | Extra                    |
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+|  1 | SIMPLE      | u     | NULL       | const | PRIMARY               | PRIMARY             | 8       | const        |    1 |   100.00 | Using index              |
+|  1 | SIMPLE      | l     | NULL       | ref   | PRIMARY,user_id_index | user_id_index       | 8       | const        |    7 |   100.00 | Using where; Using index |
+|  1 | SIMPLE      | r     | NULL       | ref   | livestream_id_index   | livestream_id_index | 8       | isupipe.l.id |    2 |   100.00 | Using index              |
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+3 rows in set, 1 warning (0.01 sec)
+```
+
+これで puma と powerdns のプロセスが上位に来るようになった。
+ただ、まだインデックスだけで改善できる箇所が残ってるようなので続ける。
+
+```
+2024-11-12T09:04:24.908Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.245315342s
+2024-11-12T09:04:24.908Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-12T09:04:24.908Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-12T09:04:24.910Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-12T09:04:24.910Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-12T09:04:24.910Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 222}
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 87 回成功
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 678 回成功
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 769 回成功, 1 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 115 回成功, 1 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 51 回成功, 6 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 88 回成功
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 222 回成功, 7 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 1 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 1 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-fail] 7 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 6 回失敗
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 72549
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 0
+2024-11-12T09:04:24.910Z	info	staff-logger	bench/bench.go:335	スコア: 43605
+```
+
+## themes のインデックス
+
+```
+EXPLAIN SELECT * FROM themes WHERE user_id = '1349';
++----+-------------+--------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table  | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+--------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | themes | NULL       | ALL  | NULL          | NULL | NULL    | NULL | 2378 |    10.00 | Using where |
++----+-------------+--------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0.00 sec)
+```
+
+```sql
+CREATE INDEX user_id_index ON themes(user_id)
+```
+
+```
+EXPLAIN SELECT * FROM themes WHERE user_id = '1349';
++----+-------------+--------+------------+------+---------------+---------------+---------+-------+------+----------+-----------------------+
+| id | select_type | table  | partitions | type | possible_keys | key           | key_len | ref   | rows | filtered | Extra                 |
++----+-------------+--------+------------+------+---------------+---------------+---------+-------+------+----------+-----------------------+
+|  1 | SIMPLE      | themes | NULL       | ref  | user_id_index | user_id_index | 8       | const |    1 |   100.00 | Using index condition |
++----+-------------+--------+------------+------+---------------+---------------+---------+-------+------+----------+-----------------------+
+1 row in set, 1 warning (0.00 sec)
+```
+
+## reservation_slots のインデックス
+
+```
+EXPLAIN SELECT slot FROM reservation_slots WHERE start_at = '1705050000' AND end_at = '1705053600';
+
++----+-------------+-------------------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table             | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------------------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | reservation_slots | NULL       | ALL  | NULL          | NULL | NULL    | NULL | 8593 |     1.00 | Using where |
++----+-------------+-------------------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0.00 sec)
+```
+
+```sql
+CREATE INDEX start_at_and_end_at_index ON reservation_slots(start_at, end_at)
+```
+
+```
+EXPLAIN SELECT slot FROM reservation_slots WHERE start_at = '1705050000' AND end_at = '1705053600';
++----+-------------+-------------------+------------+------+---------------------------+---------------------------+---------+-------------+------+----------+-----------------------+
+| id | select_type | table             | partitions | type | possible_keys             | key                       | key_len | ref         | rows | filtered | Extra                 |
++----+-------------+-------------------+------------+------+---------------------------+---------------------------+---------+-------------+------+----------+-----------------------+
+|  1 | SIMPLE      | reservation_slots | NULL       | ref  | start_at_and_end_at_index | start_at_and_end_at_index | 16      | const,const |    1 |   100.00 | Using index condition |
++----+-------------+-------------------+------------+------+---------------------------+---------------------------+---------+-------------+------+----------+-----------------------+
+```
+
+## GET /api/livestream/*/livecomment の改善
+
+mysql の方は改善されたようなので alp を眺めてみる。遅いエンドポイントは下記の5個。
+
+```
++-------+-----+-------+-----+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+----------------+-----------+
+| COUNT | 1XX |  2XX  | 3XX | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |   SUM(BODY)    | AVG(BODY) |
++-------+-----+-------+-----+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+----------------+-----------+
+|  2773 |   0 |  2771 |   0 |   2 |   0 | GET    | ^/api/livestream/.*/livecomment           | 0.001 | 0.382 | 126.470 | 0.046 | 0.099 | 0.125 | 0.185 |  0.041 |     0.000 |  57152.000 |   30584507.000 | 11029.393 |
+|  2808 |   0 |  2805 |   0 |   3 |   0 | GET    | ^/api/livestream/.*/reaction              | 0.001 | 0.324 | 123.697 | 0.044 | 0.096 | 0.120 | 0.182 |  0.040 |     0.000 |  54646.000 |   28637542.000 | 10198.555 |
+|   141 |   0 |   138 |   0 |   3 |   0 | POST   | ^/api/livestream/.*/moderate              | 0.052 | 1.897 |  98.679 | 0.700 | 1.056 | 1.163 | 1.825 |  0.319 |     0.000 |     17.000 |       2346.000 |    16.638 |
+| 22331 |   0 | 22330 |   0 |   1 |   0 | GET    | ^/api/user/.*/icon                        | 0.001 | 0.074 |  91.389 | 0.004 | 0.007 | 0.008 | 0.012 |  0.003 |     0.000 | 171652.000 | 1313994817.000 | 58841.736 |
+|   448 |   0 |   447 |   0 |   1 |   0 | GET    | ^/api/livestream/search                   | 0.014 | 0.581 |  80.776 | 0.180 | 0.230 | 0.288 | 0.425 |  0.064 |     0.000 | 147849.000 |   23550426.000 | 52567.915 |
+```
+
+ライブコメントのところを見てみよう。見た感じ2重ループでSQLを発行しているのでN+1クエリとなっている。
+
+- get '/api/livestream/:livestream_id/livecomment'
+  - fill_livecomment_response
+    - fill_user_response
+      - 'SELECT * FROM themes WHERE user_id = ?'
+      - 'SELECT image FROM icons WHERE user_id = ?'
+    - fill_livestream_response
+      - 'SELECT * FROM users WHERE id = ?'
+      - 'SELECT * FROM livestream_tags WHERE livestream_id = ?'
+      - 'SELECT * FROM tags WHERE id = ?'
+
+これかなりややこしいので fill_livecomment_response がどんなふうに振る舞うのかを console で試せるようにした。
+
+b /home/isucon/webapp/ruby/app.rb:485
+$rack.get('/api/livestream/2/livecomment')
+
+```json
+[{"id"=>543,
+  "comment"=>"明日、眠そうだけど楽しかった！",
+  "tip"=>0,
+  "created_at"=>1731417782,
+  "user"=>
+   {"id"=>3,
+    "name"=>"yoshidamiki0",
+    "display_name"=>"ひまわりひめ",
+    "description"=>"普段演歌歌手をしています。\nよろしくおねがいします！\n\n連絡は以下からお願いします。\n\nウェブサイト: http://yoshidamiki.example.com/\nメールアドレス: yoshidamiki@example.com\n",
+    "theme"=>{"id"=>3, "dark_mode"=>false},
+    "icon_hash"=>"d9f8294e9d895f81ce62e73dc7d5dff862a4fa40bd4e0fecf53f7526a8edcac0"},
+  "livestream"=>
+   {"id"=>2,
+    "title"=>"映画レビュー！最新映画の感想を語る",
+    "description"=>"最新の映画について、感想や考察を深く掘り下げて話していきます。",
+    "playlist_url"=>"https://media.xiii.isucon.dev/api/7/playlist.m3u8",
+    "thumbnail_url"=>"https://media.xiii.isucon.dev/yoru.webp",
+    "start_at"=>1690851600,
+    "end_at"=>1690855200,
+    "owner"=>
+     {"id"=>3,
+      "name"=>"yoshidamiki0",
+      "display_name"=>"ひまわりひめ",
+      "description"=>"普段演歌歌手をしています。\nよろしくおねがいします！\n\n連絡は以下からお願いします。\n\nウェブサイト: http://yoshidamiki.example.com/\nメールアドレス: yoshidamiki@example.com\n",
+      "theme"=>{"id"=>3, "dark_mode"=>false},
+      "icon_hash"=>"d9f8294e9d895f81ce62e73dc7d5dff862a4fa40bd4e0fecf53f7526a8edcac0"},
+    "tags"=>[{"id"=>98, "name"=>"コラボ配信"}, {"id"=>5, "name"=>"初心者歓迎"}]}}]
+```
+
+desciption を削ったら仕様違反になったが theme を削るのはアリだった。
+ていうか theme 使用箇所限られてるし user テーブルとくっつけてしまってまとめて取れるようにしてもいい気がする。
+影響範囲が広くなるのでリスキーだ。 fill_user_response にフラグつけて theme なしを可能にしてみるか。
+少し効果はあったけどN+1クエリがなくならない限りはまだまだ伸びないようだ。
+
+## GET /api/livestream/*/livecomment の改善2
+
+livecomment_models = tx.xquery('SELECT * FROM livecomments WHERE livestream_id = 2 ORDER BY created_at DESC')
+fill_livecomment_response(tx, livecomment_models.first)
+fill_livecomment_responses(tx, livecomment_models)
+
+
+fill_user_response と fill_livecomment_response の IN 句を使うバージョンを作ってみよう。
+
+- get '/api/livestream/:livestream_id/livecomment'
+  - fill_livecomment_response
+    - fill_user_response
+      - 'SELECT * FROM themes WHERE user_id = ?'
+      - 'SELECT image FROM icons WHERE user_id = ?'
+    - fill_livestream_response
+      - 'SELECT * FROM users WHERE id = ?'
+      - 'SELECT * FROM livestream_tags WHERE livestream_id = ?'
+      - 'SELECT * FROM tags WHERE id = ?'
+
+500 エラーが出てしまったのでログを見る。
+
+{"pass":false,"score":0,"messages":["整合性チェックに失敗しました","benchmark-application: [一般エラー] GET /api/livestream/7499/livecomment へのリクエストに対して、期待されたHTTPステータスコードが確認できませんでした (expected:200, actual:500)","[一般エラー] GET /api/livestream/7499/livecomment へのリクエストに対して、期待されたHTTPステータスコードが確認できませんでした (expected:200, actual:500)"],"language":"ruby","resolved_count":0}
+
+journalctl -u isupipe-ruby -n200 でログを見た。スタックトレースが出ているので、これを参考にして原因を探す。
+
+```
+Mysql2::Error - You have an error in your SQL syntax;
+/home/isucon/webapp/ruby/app.rb:125:in `fill_livecomment_responses'
+/home/isucon/webapp/ruby/app.rb:536
+```
+
+下記の方法でデバッグ
+
+```ruby
+$rack.get('/api/livestream/7499/livecomment')
+
+tx = $rack.app.new.helpers.db_conn
+query = 'SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC'
+livestream_id = 7499.to_i
+livecomment_models = tx.xquery(query, livestream_id)
+```
+
+一つもコメントがない場合のケースを対応できてなかったので修正してベンチマーク成功。
