@@ -390,3 +390,55 @@ possible_keys: domain_id,name_index
 2024-11-12T08:14:15.119Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 1
 2024-11-12T08:14:15.119Z	info	staff-logger	bench/bench.go:335	スコア: 26609
 ```
+
+## livecomments のインデックス
+
+一番重いクエリは下記になった。集計関数が含まれている。
+ユーザのライブに含まれるライブコメントのチップの総数を集計している。
+
+```sql
+SELECT IFNULL(SUM(l2.tip), 0) FROM users u
+INNER JOIN livestreams l ON l.user_id = u.id
+INNER JOIN livecomments l2 ON l2.livestream_id = l.id
+WHERE u.id = '151'\G
+```
+
+これも explain かけてみよう。
+
+```
+explain SELECT IFNULL(SUM(l2.tip), 0) FROM users u INNER JOIN livestreams l ON l.user_id = u.id INNER JOIN livecomments l2 ON l2.livestream_id = l.id WHERE u.id = '151';
++----+-------------+-------+------------+--------+---------------+---------+---------+--------------------------+------+----------+-------------+
+| id | select_type | table | partitions | type   | possible_keys | key     | key_len | ref                      | rows | filtered | Extra       |
++----+-------------+-------+------------+--------+---------------+---------+---------+--------------------------+------+----------+-------------+
+|  1 | SIMPLE      | u     | NULL       | const  | PRIMARY       | PRIMARY | 8       | const                    |    1 |   100.00 | Using index |
+|  1 | SIMPLE      | l2    | NULL       | ALL    | NULL          | NULL    | NULL    | NULL                     | 2601 |   100.00 | NULL        |
+|  1 | SIMPLE      | l     | NULL       | eq_ref | PRIMARY       | PRIMARY | 8       | isupipe.l2.livestream_id |    1 |    10.00 | Using where |
++----+-------------+-------+------------+--------+---------------+---------+---------+--------------------------+------+----------+-------------+
+3 rows in set, 1 warning (0.00 sec)
+```
+
+l2 の rows が高い数値になってるので l2 の絞り込み条件にインデックスを追加すれば効果がありそう。
+
+```sql
+CREATE INDEX livestream_id_index ON livecomments(livestream_id);
+```
+
+しかし explain の結果が変わらない。なぜだろう。あ、これ l の方もインデックスたりてないんじゃないか。
+
+```sql
+CREATE INDEX user_id_index ON livestreams(user_id);
+```
+
+インデックス効くようになった。
+
+```
+explain SELECT IFNULL(SUM(l2.tip), 0) FROM users u INNER JOIN livestreams l ON l.user_id = u.id INNER JOIN livecomments l2 ON l2.livestream_id = l.id WHERE u.id = '151';
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+| id | select_type | table | partitions | type  | possible_keys         | key                 | key_len | ref          | rows | filtered | Extra                    |
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+|  1 | SIMPLE      | u     | NULL       | const | PRIMARY               | PRIMARY             | 8       | const        |    1 |   100.00 | Using index              |
+|  1 | SIMPLE      | l     | NULL       | ref   | PRIMARY,user_id_index | user_id_index       | 8       | const        |    8 |   100.00 | Using where; Using index |
+|  1 | SIMPLE      | l2    | NULL       | ref   | livestream_id_index   | livestream_id_index | 8       | isupipe.l.id |    2 |   100.00 | NULL                     |
++----+-------------+-------+------------+-------+-----------------------+---------------------+---------+--------------+------+----------+--------------------------+
+3 rows in set, 1 warning (0.00 sec)
+```
