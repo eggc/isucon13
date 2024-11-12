@@ -876,6 +876,7 @@ module Isupipe
           name: req.name,
           display_name: req.display_name,
           description: req.description,
+          icon_hash: "d9f8294e9d895f81ce62e73dc7d5dff862a4fa40bd4e0fecf53f7526a8edcac0"
         })
       end
 
