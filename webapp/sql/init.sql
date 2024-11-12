@@ -11,6 +11,8 @@ TRUNCATE TABLE livecomments;
 TRUNCATE TABLE livestreams;
 TRUNCATE TABLE users;
 
+-- CREATE INDEX idx_user_id ON icons(user_id);
+
 ALTER TABLE `themes` auto_increment = 1;
 ALTER TABLE `icons` auto_increment = 1;
 ALTER TABLE `reservation_slots` auto_increment = 1;
