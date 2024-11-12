@@ -121,7 +121,7 @@ module Isupipe
       end
 
       def fill_livecomment_responses(tx, livecomment_models)
-        return [] if livecomment_models.empty?
+        return [] if livecomment_models.size == 0
 
         user_ids = livecomment_models.map { _1[:user_id] }.join(",")
         comment_owner_models = tx.xquery("SELECT * FROM users WHERE id IN (#{user_ids})")
@@ -180,7 +180,7 @@ module Isupipe
       end
 
       def fill_user_responses(tx, user_models, with_theme: true)
-        return [] if user_models.empty?
+        return [] if user_models.size == 0
 
         user_ids = user_models.map{ _1[:id] }.join(",")
 
