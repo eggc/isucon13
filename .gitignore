@@ -9,3 +9,5 @@ webapp/perl/
 webapp/php/
 webapp/python/
 webapp/rust/
+log/nginx-access.log
+log/slow.log
