@@ -120,6 +120,24 @@ module Isupipe
         )
       end
 
+      def fill_livecomment_responses(tx, livecomment_models)
+        user_ids = livecomment_models.map { _1[:user_id] }.join(",")
+        comment_owner_models = tx.xquery("SELECT * FROM users WHERE id IN (#{user_ids})")
+        comment_owners = fill_user_responses(tx, comment_owner_models, with_theme: false).to_h do
+          [_1[:id], _1]
+        end
+
+        livecomment_models.map do |livecomment_model|
+          livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livecomment_model.fetch(:livestream_id)).first
+          livestream = fill_livestream_response(tx, livestream_model)
+
+          livecomment_model.slice(:id, :comment, :tip, :created_at).merge(
+            user: comment_owners[livecomment_model[:user_id]],
+            livestream:,
+          )
+        end
+      end
+
       def fill_livecomment_response(tx, livecomment_model)
         comment_owner_model = tx.xquery('SELECT * FROM users WHERE id = ?', livecomment_model.fetch(:user_id)).first
         comment_owner = fill_user_response(tx, comment_owner_model, with_theme: false)
@@ -157,6 +175,41 @@ module Isupipe
           user:,
           livestream:,
         )
+      end
+
+      def fill_user_responses(tx, user_models, with_theme: true)
+        user_ids = user_models.map{ _1[:id] }.join(",")
+
+        theme_models = nil
+        if with_theme
+          theme_models = tx.xquery("SELECT * FROM themes WHERE user_id IN (#{user_ids})").to_h do
+            [_1[:user_id], _1]
+          end
+        end
+
+        icon_models = tx.xquery("SELECT user_id, image FROM icons WHERE user_id IN (#{user_ids})").to_h do
+          [_1[:user_id], _1]
+        end
+
+        user_models.map do |user_model|
+          user_id = user_model.fetch(:id)
+          icon_model = icon_models[user_id]
+          image =
+            if icon_model
+              icon_model.fetch(:image)
+            else
+              File.binread(FALLBACK_IMAGE)
+            end
+
+          {
+            id: user_id,
+            name: user_model.fetch(:name),
+            display_name: user_model.fetch(:display_name),
+            description: user_model.fetch(:description),
+            theme: theme_models ? theme_models[user_id].slice(:id, :dark_mode) : {},
+            icon_hash: Digest::SHA256.hexdigest(image),
+          }
+        end
       end
 
       def fill_user_response(tx, user_model, with_theme: true)
@@ -479,9 +532,8 @@ module Isupipe
           query = "#{query} LIMIT #{limit}"
         end
 
-        tx.xquery(query, livestream_id).map do |livecomment_model|
-          fill_livecomment_response(tx, livecomment_model)
-        end
+        livecomment_models = tx.xquery(query, livestream_id)
+        fill_livecomment_responses(tx, livecomment_models)
       end
 
       json(livecomments)
