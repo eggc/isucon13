@@ -790,12 +790,14 @@ module Isupipe
         unless user
           raise HttpError.new(404, 'not found user that has the given username')
         end
-        tx.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
-      end
 
-      if image && "\"#{Digest::SHA256.hexdigest(image[:image])}\"" == request.env["HTTP_IF_NONE_MATCH"]
-        status 304
-        return body nil
+        icon_hash = user[:icon_hash]
+        if icon_hash && "\"#{icon_hash}\"" == request.env["HTTP_IF_NONE_MATCH"]
+          status 304
+          return body nil
+        end
+
+        tx.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
       end
 
       content_type 'image/jpeg'
@@ -822,9 +824,11 @@ module Isupipe
 
       req = decode_request_body(PostIconRequest)
       image = Base64.decode64(req.image)
+      icon_hash = Digest::SHA256.hexdigest(image)
 
       icon_id = db_transaction do |tx|
         tx.xquery('DELETE FROM icons WHERE user_id = ?', user_id)
+        tx.xquery('UPDATE users SET icon_hash = ? WHERE id = ?', icon_hash, user_id)
         tx.xquery('INSERT INTO icons (user_id, image) VALUES (?, ?)', user_id, image)
         tx.last_id
       end
