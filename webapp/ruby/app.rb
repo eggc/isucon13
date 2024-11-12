@@ -122,7 +122,7 @@ module Isupipe
 
       def fill_livecomment_response(tx, livecomment_model)
         comment_owner_model = tx.xquery('SELECT * FROM users WHERE id = ?', livecomment_model.fetch(:user_id)).first
-        comment_owner = fill_user_response(tx, comment_owner_model)
+        comment_owner = fill_user_response(tx, comment_owner_model, with_theme: false)
 
         livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livecomment_model.fetch(:livestream_id)).first
         livestream = fill_livestream_response(tx, livestream_model)
@@ -159,9 +159,8 @@ module Isupipe
         )
       end
 
-      def fill_user_response(tx, user_model)
-        theme_model = tx.xquery('SELECT * FROM themes WHERE user_id = ?', user_model.fetch(:id)).first
-
+      def fill_user_response(tx, user_model, with_theme: true)
+        theme_model = tx.xquery('SELECT * FROM themes WHERE user_id = ?', user_model.fetch(:id)).first if with_theme
         icon_model = tx.xquery('SELECT image FROM icons WHERE user_id = ?', user_model.fetch(:id)).first
         image =
           if icon_model
@@ -171,15 +170,17 @@ module Isupipe
           end
         icon_hash = Digest::SHA256.hexdigest(image)
 
+        theme = with_theme ? {
+          id: theme_model.fetch(:id),
+          dark_mode: theme_model.fetch(:dark_mode),
+        } : {}
+
         {
           id: user_model.fetch(:id),
           name: user_model.fetch(:name),
           display_name: user_model.fetch(:display_name),
           description: user_model.fetch(:description),
-          theme: {
-            id: theme_model.fetch(:id),
-            dark_mode: theme_model.fetch(:dark_mode),
-          },
+          theme: theme,
           icon_hash:,
         }
       end
