@@ -102,6 +102,36 @@ module Isupipe
         nil
       end
 
+      def fill_livestream_responses(tx, livestream_models)
+        return [] if livestream_models.size == 0
+
+        user_ids = livestream_models.map { _1[:user_id] }.join(",")
+        owner_models = tx.xquery("SELECT * FROM users WHERE id IN (#{user_ids})")
+        owners = fill_user_responses(tx, owner_models, with_theme: false).to_h do
+          [_1[:id], _1]
+        end
+
+        livestream_ids = livestream_models.map { _1[:id] }.join(",")
+        tag_models = tx.xquery(<<-SQL)
+          SELECT livestream_id, tags.* FROM tags
+            INNER JOIN livestream_tags ON livestream_tags.tag_id = tags.id
+            WHERE livestream_tags.livestream_id IN(#{livestream_ids});
+        SQL
+        tags = tag_models.to_h do
+          [_1[:livestream_id], _1.slice(:id, :name)]
+        end
+
+        livestream_models.map do |livestream_model|
+          livestream_id = livestream_model[:id]
+          user_id = livestream_model[:user_id]
+
+          livestream_model.slice(:id, :title, :description, :playlist_url, :thumbnail_url, :start_at, :end_at).merge(
+            owner: owners[user_id],
+            tags: tags[livestream_id] || [],
+          )
+        end
+      end
+
       def fill_livestream_response(tx, livestream_model)
         owner_model = tx.xquery('SELECT * FROM users WHERE id = ?', livestream_model.fetch(:user_id)).first
         owner = fill_user_response(tx, owner_model)
@@ -393,9 +423,7 @@ module Isupipe
             tx.xquery(query).to_a
           end
 
-        livestream_models.map do |livestream_model|
-          fill_livestream_response(tx, livestream_model)
-        end
+        fill_livestream_responses(tx, livestream_models)
       end
 
       json(livestreams)
