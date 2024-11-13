@@ -701,22 +701,12 @@ module Isupipe
 
         # NGワードにヒットする過去の投稿も全削除する
         tx.xquery('SELECT * FROM ng_words WHERE livestream_id = ?', livestream_id).each do |ng_word|
-          # ライブコメント一覧取得
-          tx.xquery('SELECT * FROM livecomments').each do |livecomment|
-            query = <<~SQL
-              DELETE FROM livecomments
-              WHERE
-              id = ? AND
-              livestream_id = ? AND
-              (SELECT COUNT(*)
-              FROM
-              (SELECT ? AS text) AS texts
-              INNER JOIN
-              (SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-              ON texts.text LIKE patterns.pattern) >= 1
-            SQL
-            tx.xquery(query, livecomment.fetch(:id), livestream_id, livecomment.fetch(:comment), ng_word.fetch(:word))
-          end
+          word = ng_word.fetch(:word)
+
+          query = <<~SQL
+            DELETE FROM livecomments WHERE livestream_id = ? AND livecomments.comment LIKE '%#{word}%'
+          SQL
+          tx.xquery(query, livestream_id)
         end
 
         word_id
