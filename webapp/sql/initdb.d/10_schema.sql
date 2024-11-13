@@ -112,5 +112,6 @@ CREATE INDEX user_id_index ON livestreams(user_id);
 CREATE INDEX livestream_id_index ON reactions(livestream_id);
 CREATE INDEX user_id_index ON themes(user_id);
 CREATE INDEX start_at_and_end_at_index ON reservation_slots(start_at, end_at);
+CREATE INDEX livestream_id_index ON ng_words(livestream_id);
 
 ALTER TABLE users ADD COLUMN icon_hash VARCHAR(128) DEFAULT 'd9f8294e9d895f81ce62e73dc7d5dff862a4fa40bd4e0fecf53f7526a8edcac0';
