@@ -1088,12 +1088,16 @@ module Isupipe
         end
 
         # ランク算出
-        ranking = tx.xquery('SELECT * FROM livestreams').map do |livestream|
-          reactions = tx.xquery('SELECT COUNT(*) FROM livestreams l INNER JOIN reactions r ON l.id = r.livestream_id WHERE l.id = ?', livestream.fetch(:id), as: :array).first[0]
+        livestreams = tx.xquery('SELECT * FROM livestreams')
+        reactions = tx.xquery('SELECT livestreams.id, COUNT(reactions.id) AS point_a FROM livestreams INNER JOIN reactions ON reactions.livestream_id = livestreams.id GROUP BY livestreams.id;')
+                      .to_h { [_1[:id], _1[:point_a]] }
+        tips = tx.xquery('SELECT livestreams.id, SUM(livecomments.tip) AS point_b FROM livestreams INNER JOIN livecomments ON livecomments.livestream_id = livestreams.id WHERE livecomments.tip > 0 GROUP BY livestreams.id;')
+                 .to_h { [_1[:id], _1[:point_b]] }
 
-          total_tips = tx.xquery('SELECT IFNULL(SUM(l2.tip), 0) FROM livestreams l INNER JOIN livecomments l2 ON l.id = l2.livestream_id WHERE l.id = ?', livestream.fetch(:id), as: :array).first[0]
-
-          score = reactions + total_tips
+        ranking = livestreams.map do |livestream|
+          a = reactions[livestream[:id]] || 0
+          b = tips[livestream[:id]] || 0
+          score = a + b
           LivestreamRankingEntry.new(livestream_id: livestream.fetch(:id), score:)
         end
         ranking.sort_by! { |entry| [entry.score, entry.livestream_id] }
@@ -1107,7 +1111,7 @@ module Isupipe
         max_tip = tx.xquery('SELECT IFNULL(MAX(tip), 0) FROM livestreams l INNER JOIN livecomments l2 ON l2.livestream_id = l.id WHERE l.id = ?', livestream_id, as: :array).first[0]
 
 	# リアクション数
-        total_reactions = tx.xquery('SELECT COUNT(*) FROM livestreams l INNER JOIN reactions r ON r.livestream_id = l.id WHERE l.id = ?', livestream_id, as: :array).first[0]
+        total_reactions = reactions[livestream_id] || 0
 
 	# スパム報告数
         total_reports = tx.xquery('SELECT COUNT(*) FROM livestreams l INNER JOIN livecomment_reports r ON r.livestream_id = l.id WHERE l.id = ?', livestream_id, as: :array).first[0]
