@@ -666,7 +666,6 @@ livecomment_models = tx.xquery('SELECT * FROM livecomments WHERE livestream_id =
 fill_livecomment_response(tx, livecomment_models.first)
 fill_livecomment_responses(tx, livecomment_models)
 
-
 fill_user_response と fill_livecomment_response の IN 句を使うバージョンを作ってみよう。
 
 - get '/api/livestream/:livestream_id/livecomment'
@@ -703,3 +702,185 @@ livecomment_models = tx.xquery(query, livestream_id)
 ```
 
 一つもコメントがない場合のケースを対応できてなかったので修正してベンチマーク成功。
+
+## iconの改善1
+
+アプリケーションガイドによると、下記のエンドポイントでは If-None-Match ヘッダがついていることがあり、その場合は 304 を返すことができるらしい。
+
+get '/api/user/:username/icon'
+
+304 を実装してみよう。
+
+```ruby
+binding.irb
+debug
+b /home/isucon/webapp/ruby/app.rb:787
+
+$rack.get('/api/user/test001')
+
+JSON.parse($rack.get('/api/user/test001').body)["icon_hash"]
+#=> "1225d203cd3871dec173cb6a4f7aec1202f2880f903874e3495a4d5248d0c60d"
+
+$rack.header("If-None-Match", "1225d203cd3871dec173cb6a4f7aec1202f2880f903874e3495a4d5248d0c60d")
+$rack.get('/api/user/test001/icon')
+```
+
+ログのレスポンスでは status:304 が含まれていない。If-None-Match を含むリクエストが存在するのかどうか、確認してみよう。
+nginx のログで request header の中身を出力するようにしてみよう。$http_if_none_match を書き込むと、確かにでた。
+ハッシュ値が \x22 というので囲まれていた。ドキュメントを見ると `"` で囲まれていた。実際のリクエストもそうなっているようだ。これを考慮しなければならない。
+
+少し改善した。
+
+## iconの改善2
+
+304を返すときに icon テーブルからバイナリを読み出して毎回 hexdigest をとっていたので内部コストが高いと考えた。
+そこで users テーブルに icon_hash カラムを追加して、 hexdigest の結果を保存しておくことにした。
+アイコン更新時に、このカラムを更新することで常に最新の値を持つようにした。
+
+## iconの改善3
+
+icon_hash を返すべき場面で毎回計算するのではなくて users テーブルに格納している計算結果を使うようにする。
+しかし一度もアイコン設定してない場合に仕様違反になってしまったので修正。
+
+JSON.parse($rack.get('/api/livestream/7508/livecomment').body)
+
+あらかじめ計算しておいて users テーブルの icon_hash カラムのデフォルト値ということにしてみる。
+
+```ruby
+FALLBACK_IMAGE = '../img/NoImage.jpg'
+image = File.binread(FALLBACK_IMAGE)
+icon_hash = Digest::SHA256.hexdigest(image)
+
+#=> "d9f8294e9d895f81ce62e73dc7d5dff862a4fa40bd4e0fecf53f7526a8edcac0"
+```
+
+## GET '/api/livestream/:livestream_id/reaction' の改善
+
+```
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+| COUNT | 1XX | 2XX  |  3XX  | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |  SUM(BODY)   | AVG(BODY) |
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+|   138 |   0 |  136 |     0 |   2 |   0 | POST   | ^/api/livestream/.*/moderate              | 0.052 | 1.504 | 106.560 | 0.772 | 1.219 | 1.334 | 1.477 |  0.313 |     0.000 |     17.000 |     2312.000 |    16.754 |
+|  4220 |   0 | 4218 |     0 |   2 |   0 | GET    | ^/api/livestream/.*/reaction              | 0.001 | 0.177 | 105.823 | 0.025 | 0.054 | 0.070 | 0.099 |  0.022 |     0.000 |  60814.000 | 47867246.000 | 11342.949 |
+|    25 |   0 |   23 |     0 |   2 |   0 | GET    | ^/api/livestream/.*/statistics            | 0.813 | 4.942 | 100.497 | 4.020 | 4.674 | 4.809 | 4.942 |  1.118 |     0.000 |     83.000 |     1866.000 |    74.640 |
+```
+
+シンプルに N+1 クエリが発生しているので livecomment の対応の時と同じことをすればよさそう
+
+```ruby
+tx = $rack.app.new.helpers.db_conn
+query = 'SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC'
+livestream_id = 5849
+reaction_models = tx.xquery(query, livestream_id)
+
+# 既存のコードの振る舞い
+$rack.app.new.helpers.fill_reaction_response(tx, reaction_models.first)
+
+# 期待するコードの振る舞い
+class Isupipe::App
+  helpers do
+    def fill_reaction_responses(tx, reaction_models)
+      ... ここに書く ...
+    end
+  end
+end
+
+$rack.app.new.helpers.fill_reaction_responses(tx, reaction_models)
+```
+
+ライブストリーム id は全て同じだから一回ひいて再利用できる。
+スコアが少し改善した。
+
+## POST '/api/livestream/:livestream_id/moderate' の改善
+
+NG ワード登録されると、ライブコメントの削除が行われる。
+その削除SQLがコストが高いようだ。
+
+```
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+| COUNT | 1XX | 2XX  |  3XX  | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |  SUM(BODY)   | AVG(BODY) |
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+|   115 |   0 |  112 |     0 |   3 |   0 | POST   | ^/api/livestream/.*/moderate              | 0.053 | 3.947 | 121.625 | 1.058 | 2.559 | 2.834 | 3.309 |  0.809 |     0.000 |     17.000 |     1904.000 |    16.557 |
+|    27 |   0 |   25 |     0 |   2 |   0 | GET    | ^/api/livestream/.*/statistics            | 0.598 | 6.250 | 120.783 | 4.473 | 6.200 | 6.241 | 6.250 |  1.569 |     0.000 |     82.000 |     2022.000 |    74.889 |
+```
+
+重たいとされているクエリが複雑でよくわからない。
+
+```sql
+DELETE FROM livecomments
+WHERE
+id = '1243' AND
+livestream_id = '7662' AND
+(SELECT COUNT(*)
+  FROM
+  (SELECT '次の周年も一緒に祝いたい' AS text) AS texts
+   INNER JOIN (SELECT CONCAT('%', '音楽構造論', '%') AS pattern) AS patterns
+           ON texts.text LIKE patterns.pattern
+  ) >= 1;
+```
+
+サブクエリがあるのでサブクエリから観察すると from 句がないものになってる。こういう SQL がアリなのは知らなかった。
+これは文字列の部分一致をしたいだけに見える。
+
+```sql
+SELECT * FROM (SELECT '次の音楽構造論の周年も一緒に祝いたい' AS text) AS texts
+INNER JOIN (SELECT CONCAT('%', '音楽構造論', '%') AS pattern) AS patterns ON texts.text LIKE patterns.pattern;
+
++--------------------------------------------------------+-------------------+
+| text                                                   | pattern           |
++--------------------------------------------------------+-------------------+
+| 次の音楽構造論の周年も一緒に祝いたい                   | %音楽構造論%      |
++--------------------------------------------------------+-------------------+
+```
+
+こんな感じで部分一致した場合に true になればいいという考え方だけどこれは明らかに DB でやる必要がない。アプリケーションコードに移動させれば効率化できそう。ちなみに explain だとあまりうまく検出できない。元々 delete の文なので削除ずみの場合は条件を満たすレコードが発見できなくて下記のようになる。
+
+```
+EXPLAIN select * from  livecomments WHERE id = '1243' AND livestream_id = '7662' AND (SELECT COUNT(*) FROM (SELECT '次の周年も一緒に祝いたい' AS text) AS texts INNER JOIN (SELECT CONCAT('%', '音楽構造論', '%')AS pattern) AS patterns ON texts.text LIKE patterns.pattern) >= 1;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-----------------------------------------------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra                                               |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-----------------------------------------------------+
+|  1 | PRIMARY     | NULL  | NULL       | NULL | NULL          | NULL | NULL    | NULL | NULL |     NULL | Impossible WHERE                                    |
+|  2 | SUBQUERY    | NULL  | NULL       | NULL | NULL          | NULL | NULL    | NULL | NULL |     NULL | Impossible WHERE noticed after reading const tables |
+|  4 | DERIVED     | NULL  | NULL       | NULL | NULL          | NULL | NULL    | NULL | NULL |     NULL | No tables used                                      |
+|  3 | DERIVED     | NULL  | NULL       | NULL | NULL          | NULL | NULL    | NULL | NULL |     NULL | No tables used                                      |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-----------------------------------------------------+
+4 rows in set, 1 warning (0.00 sec)
+```
+
+テストコードを書きたいが POST なので注意深くやる必要がありそう、日本語で書いてみる。
+
+1. ライブにひもづくNGワードを全部取得する
+2. それぞれのNGワードに対して下記を実行する
+   1. あらゆるライブコメントを全件とりだす
+   2. 下記の条件を満たすライブコメントを削除する
+     - ライブコメントの内容と、NGワードが部分一致する
+     - ライブコメントがそのライブに投稿されている
+
+今の実装はかなり効率が悪いのが見える
+
+部分一致は発見が難しいけど、ライブにひもづくライブコメントだけを対象にするのは簡単。
+下記の SQL でよさそう。
+
+```sql
+- 削除できるか確認
+BEGIN;
+SELECT * FROM livecomments WHERE livestream_id = 7866;
+SELECT * FROM livecomments WHERE livestream_id = 7866 AND livecomments.comment LIKE '%！%';
+DELETE FROM livecomments WHERE livestream_id = 7866 AND livecomments.comment LIKE '%！%';
+SELECT * FROM livecomments WHERE livestream_id = 7866;
+
+- 戻す
+ROLLBACK;
+SELECT * FROM livecomments WHERE livestream_id = 7866;
+```
+
+mysql2-cs-bind での LIKE 句の書き方がわからないのでプレースホルダーは使わないことにした。
+
+```ruby
+tx = $rack.app.new.helpers.db_conn
+tx.xquery("SELECT * FROM livecomments WHERE livestream_id = ?", 7866).to_a
+tx.xquery("SELECT * FROM livecomments WHERE livestream_id = ? AND livecomments.comment LIKE '%！%'", 7866).to_a
+```
+
+これは POST の内容が複雑なのでちょっとテストできない。一回ベンチマーク回してみよう。
