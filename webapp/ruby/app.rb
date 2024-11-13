@@ -404,31 +404,31 @@ module Isupipe
     get '/api/livestream/search' do
       key_tag_name = params[:tag] || ''
 
-      livestreams = db_transaction do |tx|
-        livestream_models =
-          if key_tag_name != ''
-            # タグによる取得
-            tx.xquery(<<-SQL, key_tag_name).to_a
+      tx = db_conn
+
+      livestream_models =
+        if key_tag_name != ''
+          # タグによる取得
+          tx.xquery(<<-SQL, key_tag_name).to_a
               SELECT livestreams.* FROM tags
               INNER JOIN livestream_tags ON livestream_tags.tag_id = tags.id
               INNER JOIN livestreams ON livestreams.id = livestream_tags.livestream_id
               WHERE tags.name = ?
               ORDER BY livestream_id DESC;
             SQL
-          else
-            # 検索条件なし
-            query = 'SELECT * FROM livestreams ORDER BY id DESC'
-            limit_str = params[:limit] || ''
-            if limit_str != ''
-              limit = cast_as_integer(limit_str)
-              query = "#{query} LIMIT #{limit}"
-            end
-
-            tx.xquery(query).to_a
+        else
+          # 検索条件なし
+          query = 'SELECT * FROM livestreams ORDER BY id DESC'
+          limit_str = params[:limit] || ''
+          if limit_str != ''
+            limit = cast_as_integer(limit_str)
+            query = "#{query} LIMIT #{limit}"
           end
 
-        fill_livestream_responses(tx, livestream_models)
-      end
+          tx.xquery(query).to_a
+        end
+
+      livestreams = fill_livestream_responses(tx, livestream_models)
 
       json(livestreams)
     end
@@ -444,10 +444,10 @@ module Isupipe
         raise HttpError.new(401)
       end
 
-      livestreams = db_transaction do |tx|
-        tx.xquery('SELECT * FROM livestreams WHERE user_id = ?', user_id).map do |livestream_model|
-          fill_livestream_response(tx, livestream_model)
-        end
+      tx = db_conn
+
+      livestreams = tx.xquery('SELECT * FROM livestreams WHERE user_id = ?', user_id).map do |livestream_model|
+        fill_livestream_response(tx, livestream_model)
       end
 
       json(livestreams)
@@ -457,15 +457,15 @@ module Isupipe
       verify_user_session!
       username = params[:username]
 
-      livestreams = db_transaction do |tx|
-        user = tx.xquery('SELECT * FROM users WHERE name = ?', username).first
-        unless user
-          raise HttpError.new(404, 'user not found')
-        end
+      tx = db_conn
 
-        tx.xquery('SELECT * FROM livestreams WHERE user_id = ?', user.fetch(:id)).map do |livestream_model|
-          fill_livestream_response(tx, livestream_model)
-        end
+      user = tx.xquery('SELECT * FROM users WHERE name = ?', username).first
+      unless user
+        raise HttpError.new(404, 'user not found')
+      end
+
+      livestreams = tx.xquery('SELECT * FROM livestreams WHERE user_id = ?', user.fetch(:id)).map do |livestream_model|
+        fill_livestream_response(tx, livestream_model)
       end
 
       json(livestreams)
@@ -516,14 +516,14 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      livestream = db_transaction do |tx|
-        livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livestream_id).first
-        unless livestream_model
-          raise HttpError.new(404)
-        end
+      tx = db_conn
 
-        fill_livestream_response(tx, livestream_model)
+      livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livestream_id).first
+      unless livestream_model
+        raise HttpError.new(404)
       end
+
+      livestream = fill_livestream_response(tx, livestream_model)
 
       json(livestream)
     end
@@ -543,15 +543,15 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      reports = db_transaction do |tx|
-        livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livestream_id).first
-        if livestream_model.fetch(:user_id) != user_id
-          raise HttpError.new(403, "can't get other streamer's livecomment reports")
-        end
+      tx = db_conn
 
-        tx.xquery('SELECT * FROM livecomment_reports WHERE livestream_id = ?', livestream_id).map do |report_model|
-          fill_livecomment_report_response(tx, report_model)
-        end
+      livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livestream_id).first
+      if livestream_model.fetch(:user_id) != user_id
+        raise HttpError.new(403, "can't get other streamer's livecomment reports")
+      end
+
+      reports = tx.xquery('SELECT * FROM livecomment_reports WHERE livestream_id = ?', livestream_id).map do |report_model|
+        fill_livecomment_report_response(tx, report_model)
       end
 
       json(reports)
@@ -562,17 +562,16 @@ module Isupipe
       verify_user_session!
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      livecomments = db_transaction do |tx|
-        query = 'SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC'
-        limit_str = params[:limit] || ''
-        if limit_str != ''
-          limit = cast_as_integer(limit_str)
-          query = "#{query} LIMIT #{limit}"
-        end
-
-        livecomment_models = tx.xquery(query, livestream_id)
-        fill_livecomment_responses(tx, livecomment_models)
+      tx = db_conn
+      query = 'SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC'
+      limit_str = params[:limit] || ''
+      if limit_str != ''
+        limit = cast_as_integer(limit_str)
+        query = "#{query} LIMIT #{limit}"
       end
+
+      livecomment_models = tx.xquery(query, livestream_id)
+      livecomments = fill_livecomment_responses(tx, livecomment_models)
 
       json(livecomments)
     end
