@@ -158,13 +158,16 @@ module Isupipe
           [_1[:id], _1]
         end
 
-        livecomment_models.map do |livecomment_model|
-          livestream_model = tx.xquery('SELECT * FROM livestreams WHERE id = ?', livecomment_model.fetch(:livestream_id)).first
-          livestream = fill_livestream_response(tx, livestream_model)
+        livestream_ids = livecomment_models.map { _1[:livestream_id] }.join(",")
+        livestream_models = tx.xquery("SELECT * FROM livestreams WHERE id IN(#{livestream_ids})")
+        livestreams = fill_livestream_responses(tx, livestream_models).to_h do
+          [_1[:id], _1]
+        end
 
+        livecomment_models.map do |livecomment_model|
           livecomment_model.slice(:id, :comment, :tip, :created_at).merge(
             user: comment_owners[livecomment_model[:user_id]],
-            livestream:,
+            livestream: livestreams[livecomment_model[:livestream_id]],
           )
         end
       end
