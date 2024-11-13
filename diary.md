@@ -884,3 +884,514 @@ tx.xquery("SELECT * FROM livecomments WHERE livestream_id = ? AND livecomments.c
 ```
 
 これは POST の内容が複雑なのでちょっとテストできない。一回ベンチマーク回してみよう。
+
+## GET '/api/livestream/search' の改善
+
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+| COUNT | 1XX | 2XX  |  3XX  | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |  SUM(BODY)   | AVG(BODY) |
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+--------------+-----------+
+|  1416 |   0 | 1416 |     0 |   0 |   0 | GET    | ^/api/livestream/search                   | 0.007 | 0.454 | 143.899 | 0.102 | 0.118 | 0.130 | 0.237 |  0.030 | 40427.000 | 155814.000 | 70845586.000 | 50032.194 |
+| 40550 |   0 |   63 | 40486 |   1 |   0 | GET    | ^/api/user/.*/icon                        | 0.001 | 0.036 | 114.228 | 0.003 | 0.005 | 0.006 | 0.008 |  0.002 |     0.000 | 171652.000 |  4258921.000 |   105.029 |
+
+
+1. キーワードとタグ名が一致するタグを取り出す
+2. 一致したタグ全てにひもづくストリームタグのストリームIDを取り出す
+3. ループ回してストリームを取り出す
+
+この辺りは inner join にするだけでよさそう。
+
+適当にタグ見つけて実験する。
+
+```sql
+SELECT livestreams.* FROM tags
+ INNER JOIN livestream_tags ON livestream_tags.tag_id = tags.id
+ INNER JOIN livestreams ON livestreams.id = livestream_tags.livestream_id
+ WHERE tags.name = ?
+ ORDER BY livestream_id DESC;
+```
+
+```ruby
+$rack.get '/api/livestream/search', tag: "釣り"
+```
+
+あまりスコアに大きな変化はなかった。alp もクエリダイジェストもあまり変化がない。
+反映できてないのかとも思ったがそういうわけではなさそう。
+ベンチマークリクエストの中にタグによる検索がどれくらい含まれているのか調べてみよう。
+調べてみたら54件しかなかった。であれば効果はあまりないのも仕方がない。
+
+## GET '/api/livestream/search' の改善2
+
+fill_livestream_response のN+1クエリを取り除いてみよう。
+
+タグの取り方を変える
+
+```sql
+SELECT tags.* FROM tags
+  INNER JOIN livestream_tags ON livestream_tags.tag_id = tags.id
+  WHERE livestream_tags.livestream_id = 8754;
+```
+
+```ruby
+tx = $rack.app.new.helpers.db_conn
+livestream_models = tx.xquery('SELECT * FROM livestreams ORDER BY id DESC LIMIT 10').to_a
+
+# 元々の振る舞い
+$rack.app.new.helpers.fill_livestream_response(tx, livestream_models.first)
+JSON.parse($rack.get('/api/livestream/search?limit=10').body).first
+
+h = $rack.app.new.helpers
+
+def h.fill_livestream_responses(tx, livestream_models)
+  ...
+end
+
+h.fill_livestream_responses(tx, livestream_models)
+```
+
+下記のエラーが出てしまった。
+
+[仕様違反] GET /api/livestream/search へのリクエストに対して、レスポンスボディに必要なフィールドがありません: [0].Owner,[0].Tags,
+
+試してみよう。期待と違う・・・すごいシンプルになってしまってる。
+
+{"id"=>7497,
+ "user_id"=>1001,
+ "title"=>"jgaMw9mHlKGQHixptnP",
+ "description"=>"ehtwgUCVjmT5NUJswgswnkhyxAnyw",
+ "playlist_url"=>"https://media.xiii.isucon.dev/api/4/playlist.m3u8",
+ "thumbnail_url"=>"https://media.xiii.isucon.dev/isucon12_final.webp",
+ "start_at"=>1711929600,
+ "end_at"=>1711933200}
+
+修正。さらに tag の集約の仕方を間違ってたので修正。
+スコアとしては下がってしまったが search のエンドポイントは大幅に改善したのでこのまま進む。
+
+## GET '/api/livestream/:livestream_id/livecomment' の改善3
+
+いままで作った fill_livecomment_responses を使って N+1 クエリをさらに減らす。
+
+
+```ruby
+JSON.parse($rack.get('/api/livestream/8300/livecomment').body)
+```
+
+スコアが少し伸びた。
+
+## GET '/api/livestream/:livestream_id/statistics' の改善
+
+アクセス数は多くないが明らかに遅い。
+
+```
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+---------------+-----------+
+| COUNT | 1XX | 2XX  |  3XX  | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |   SUM(BODY)   | AVG(BODY) |
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+---------------+-----------+
+|    34 |   0 |   34 |     0 |   0 |   0 | GET    | ^/api/livestream/.*/statistics            | 0.575 | 4.629 | 136.297 | 4.009 | 4.544 | 4.618 | 4.629 |  0.911 |    78.000 |     83.000 |      2759.000 |    81.147 |
+```
+
+```ruby
+answer = JSON.parse($rack.get('/api/livestream/8322/statistics').body)
+# => {"rank"=>364, "viewers_count"=>1, "max_tip"=>10, "total_reactions"=>8, "total_reports"=>0}
+```
+
+アルゴリズム
+
+1. ライブストリームを1つ選ぶ
+2. 全てのライブストリームについて下記を行う
+   - A: ライブストリームのリアクションの総数を計算
+   - B: ライブストリームのチップの総数を計算
+   - A+B を点数として決定
+3. ライブストリームの点数によってソートし、順位を決める
+4. 視聴者数
+5. 最大チップ
+6. リアクション数
+7. スパム報告数
+8. 上記をまとめて json 書き出し
+
+ランク計算は非常に遅いのは想像に難くない。せめてgroup by使うようにしてみるか。
+
+
+```sql
+- リアクションの数
+SELECT livestreams.id, COUNT(reactions.id) AS point_a FROM livestreams
+  INNER JOIN reactions ON reactions.livestream_id = livestreams.id
+  GROUP BY livestreams.id;
+
+- チップの数
+SELECT livestreams.id, SUM(livecomments.tip) AS point_b FROM livestreams
+  INNER JOIN livecomments ON livecomments.livestream_id = livestreams.id
+  WHERE livecomments.tip > 0
+  GROUP BY livestreams.id;
+```
+
+これだけで大きくスコアが改善した。
+
+## GET '/api/user/:username/statistics' の改善
+
+同じ作戦で改善を試みる
+
+```sql
+- リアクションの数
+SELECT livestreams.user_id, COUNT(reactions.id) AS point_a FROM livestreams
+  INNER JOIN reactions ON reactions.livestream_id = livestreams.id
+  GROUP BY livestreams.user_id;
+
+- チップの数
+SELECT livestreams.user_id, SUM(livecomments.tip) AS point_b FROM livestreams
+  INNER JOIN livecomments ON livecomments.livestream_id = livestreams.id
+  WHERE livecomments.tip > 0
+  GROUP BY livestreams.user_id;
+```
+
+これも大きくスコアが改善した。
+
+```
+2024-11-13T14:18:38.945Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.384146147s
+2024-11-13T14:18:38.945Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T14:18:38.945Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T14:18:38.945Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T14:18:38.945Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T14:18:38.945Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T14:18:38.946Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 669}
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1198 回成功, 35 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 991 回成功
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1353 回成功, 106 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 794 回成功, 25 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 56 回成功, 2 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1210 回成功, 23 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 669 回成功, 10 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 35 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 106 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 25 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-fail] 10 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 2 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 23 回失敗
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 107910
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 7
+2024-11-13T14:18:38.946Z	info	staff-logger	bench/bench.go:335	スコア: 131392
+```
+
+## ng_word のインデックス追加
+
+スロークエリの2,5,7位が ng_word に関するものになった。
+
+```sql
+SELECT id, user_id, livestream_id, word FROM ng_words WHERE user_id = '1026' AND livestream_id = '7668';
+SELECT * FROM ng_words WHERE user_id = '1137' AND livestream_id = '7794' ORDER BY created_at DESC;
+SELECT * FROM ng_words WHERE livestream_id = '8030';
+```
+
+どれもインデックスがかかってなくフルスキャンになっている。
+とりあえず livestream_id でインデックスかけるだけで改善できそう。
+
+```sql
+CREATE INDEX livestream_id_index ON ng_words(livestream_id);
+```
+
+これを追加した後は、どの SQL にも possible key が入るようになった。
+
+```
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.416327532s
+2024-11-13T14:30:32.224Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T14:30:32.224Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T14:30:32.224Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T14:30:32.224Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T14:30:32.224Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 746}
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1527 回成功, 19 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 989 回成功
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 233 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 938 回成功, 16 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 57 回成功, 1 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1514 回成功, 32 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 746 回成功, 1 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 19 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 233 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 16 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-fail] 1 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 32 回失敗
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 108408
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 0
+2024-11-13T14:30:32.224Z	info	staff-logger	bench/bench.go:335	スコア: 146232
+```
+
+## POST '/api/livestream/:livestream_id/livecomment' の改善
+
+```
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+---------------+-----------+
+| COUNT | 1XX | 2XX  |  3XX  | 4XX | 5XX | METHOD |                    URI                    |  MIN  |  MAX  |   SUM   |  AVG  |  P90  |  P95  |  P99  | STDDEV | MIN(BODY) | MAX(BODY)  |   SUM(BODY)   | AVG(BODY) |
++-------+-----+------+-------+-----+-----+--------+-------------------------------------------+-------+-------+---------+-------+-------+-------+-------+--------+-----------+------------+---------------+-----------+
+| 81125 |   0 |   99 | 81025 |   1 |   0 | GET    | ^/api/user/.*/icon                        | 0.001 | 0.034 | 216.977 | 0.003 | 0.005 | 0.005 | 0.007 |  0.002 |     0.000 | 171652.000 |   6796557.000 |    83.779 |
+|  9406 |   0 | 9404 |     0 |   2 |   0 | POST   | ^/api/livestream/.*/livecomment           | 0.001 | 0.127 | 121.289 | 0.013 | 0.018 | 0.020 | 0.034 |  0.006 |     0.000 |   1733.000 |  14168952.000 |  1506.374 |
+|  7871 |   0 | 7870 |     0 |   1 |   0 | POST   | ^/api/livestream/.*/reaction              | 0.001 | 0.146 |  89.746 | 0.011 | 0.016 | 0.018 | 0.027 |  0.005 |     0.000 |   1611.000 |  11544248.000 |  1466.681 |
+|  1527 |   0 | 1524 |     0 |   2 |   1 | POST   | /api/register                             | 0.001 | 0.149 |  55.335 | 0.036 | 0.044 | 0.048 | 0.069 |  0.009 |     0.000 | 167260.000 |    821444.000 |   537.946 |
+```
+
+アルゴリズム
+
+1. ライブストリームを取り出す
+2. ライブストリームにひもづくNGワードを取り出す
+3. NGワードごとに、文字列の部分一致を試みる
+4. 一致したら失敗
+
+NG ワードの部分一致が SQL になっていて不要な通信コストをかけているのでこれは取り除くことができそう
+
+```
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.458042786s
+2024-11-13T14:44:42.789Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T14:44:42.789Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T14:44:42.789Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T14:44:42.789Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T14:44:42.789Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 767}
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1551 回成功, 27 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 993 回成功
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 183 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 965 回成功, 19 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 56 回成功, 2 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1552 回成功, 27 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 767 回成功
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 27 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 183 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 19 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 2 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 27 回失敗
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 109186
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 5
+2024-11-13T14:44:42.789Z	info	staff-logger	bench/bench.go:335	スコア: 148516
+```
+
+## tag に関するN+1クエリの削除
+
+クエリダイジェストをみると tag のシンプルなクエリが大量に実行されているのがわかったので、それらしい箇所を修正した。
+
+```
+2024-11-13T14:59:25.100Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.348502601s
+2024-11-13T14:59:25.100Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T14:59:25.100Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T14:59:25.101Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T14:59:25.101Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T14:59:25.101Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 789}
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1602 回成功, 27 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1032 回成功
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 312 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1006 回成功, 13 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 56 回成功, 2 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1595 回成功, 36 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 789 回成功
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 27 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 312 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 13 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 2 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 36 回失敗
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 113607
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 2
+2024-11-13T14:59:25.101Z	info	staff-logger	bench/bench.go:335	スコア: 155391
+```
+
+## トランザクションの削除
+
+クエリダイジェストで COMMIT が全体の 58% も消費しているので、明らかに不要なトランザクションを削除した。
+少し改善効果があった。
+
+```
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.345773645s
+2024-11-13T15:14:32.101Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T15:14:32.101Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T15:14:32.101Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T15:14:32.101Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T15:14:32.101Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 828}
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1597 回成功, 33 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1066 回成功
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 313 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1008 回成功, 23 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 56 回成功, 2 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1609 回成功, 23 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 828 回成功
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 33 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 313 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 23 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 2 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 23 回失敗
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 117234
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 1
+2024-11-13T15:14:32.101Z	info	staff-logger	bench/bench.go:335	スコア: 161842
+```
+
+まだ COMMIT が支配的なので、トランザクションを積極的に削ってみることにした。
+そこまで大きな効果はなかった。 icon のインサートが重いのではないかと思った。
+
+## pdns のログを観察
+
+クエリダイジェストで、ほとんどが DNS のクエリとなっており、かつ件数が 30 万以上の回数となっている。
+これはどうやら DNS 水責めによるものではないかと考えた。
+
+journalctl -u pdns -n1000
+
+ログを見るとめちゃめちゃな文字列が入っていたりする。
+
+```
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'pipe.u.isucon.local|A', do = 0, bufsize = 512
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'oj0t0tphnn5rehiuhozv8avap5kcd0q0.u.isucon.local|A', do = 0, bufsize =>
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants '5bjafwrwd06e9yeq5e2gytzbgh0.u.isucon.local|A', do = 0, bufsize = 512
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants '1a6rxst9qn4qxhfn9m0.u.isucon.local|A', do = 0, bufsize = 512
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'kvh9ly1n5x2dfk2olp00vs0.u.isucon.local|A', do = 0, bufsize = 512
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'lic7oviu5xb9i5502g45l4rtquzf50.u.isucon.local|A', do = 0, bufsize = 5>
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'ylkhlpvotog6ocmyw230.u.isucon.local|A', do = 0, bufsize = 512
+Nov 14 00:32:36 isucon13 pdns_server[366]: Remote 127.0.0.1 wants 'iokvb46w9vzud6hw3me6q109csm0.u.isucon.local|A', do = 0, bufsize = 512
+```
+
+これをどうにか無視するようにしたい。
+ベンチマークが1箇所なので攻撃元は 127.0.0.1 しかない。
+これはちょっと対策がわからないので講評を見てみよう。
+
+# 5️⃣ 講評を見ながらさらに改善を試みる
+
+https://isucon.net/archives/58001272.html
+
+- 初期実装では各DNSレコードのTTLが 0 で設定されているので、数値を大きくし名前解決結果をベンチマーク側でキャッシュさせる
+- PowerDNSのキャッシュ機能を有効にする
+- データベースに不足しているインデックスを付与する
+- アプリケーションのデータベースと分離する
+- DNSサーバを実装し、ユーザ名がDBになければゆっくりレスポンスをする、あるいはレスポンスをしない
+- dnsdist を導入し、NXDOMAIN(名前が見つからない場合)にゆっくりレスポンスをする、あるいはレスポンスをしないフィルタを導入する
+
+TTL を増やしてみよう。
+
+cat /etc/powerdns/pdns.conf
+
+```
+api=yes
+api-key=isudns
+webserver=yes
+include-dir=/etc/powerdns/pdns.d
+launch=gmysql
+gmysql-port=3306
+gmysql-user=isudns
+gmysql-dbname=isudns
+gmysql-password=isudns
+local-port=53
+security-poll-suffix=
+setgid=pdns
+setuid=pdns
+cache-ttl=0
+negquery-cache-ttl=0
+query-cache-ttl=0
+zone-cache-refresh-interval=0
+zone-metadata-cache-ttl=0
+
+log-dns-queries=yes
+loglevel=7
+log-dns-details=yes
+```
+
+それぞれの ttl を 3600 にしてみる。
+
+sudo systemctl restart pdns
+
+クエリダイジェストで DNS 水責めの痕跡が少し和らいで、スコアが改善した。
+
+```
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.116377702s
+2024-11-13T15:52:52.881Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T15:52:52.881Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T15:52:52.881Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T15:52:52.881Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T15:52:52.881Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 868}
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 1817 回成功, 38 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1814 回成功
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 780 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1228 回成功, 20 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 57 回成功, 1 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1818 回成功, 38 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 868 回成功, 4 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 38 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 780 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 20 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-fail] 4 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 38 回失敗
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 183261
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 18
+2024-11-13T15:52:52.881Z	info	staff-logger	bench/bench.go:335	スコア: 166487
+```
+
+DNS サーバー実装するのは無理だなぁ。後は nginx, mysql, sinatra のログ切って終了でいいかな。
+
+```
+2024-11-13T16:06:19.595Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.961817196s
+2024-11-13T16:06:19.595Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-13T16:06:19.595Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-13T16:06:19.595Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-13T16:06:19.596Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T16:06:19.596Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 936}
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 2002 回成功, 29 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1781 回成功
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 1154 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1244 回成功, 20 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 58 回成功, 1 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 1996 回成功, 36 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 936 回成功
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 29 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 1154 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 20 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 36 回失敗
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 186493
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 0
+2024-11-13T16:06:19.596Z	info	staff-logger	bench/bench.go:335	スコア: 181700
+```
+
+powerdns のログも切ってみるか。ほんの少しスコアが増えた。
+
+```
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.933701326s
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 2013 回成功, 32 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1789 回成功
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 1198 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1327 回成功, 20 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 58 回成功, 1 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 2003 回成功, 44 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 941 回成功
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 32 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 1198 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 20 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-13T16:09:47.358Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 44 回失敗
+2024-11-13T16:09:47.359Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-13T16:09:47.359Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 187414
+2024-11-13T16:09:47.359Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 1
+2024-11-13T16:09:47.359Z	info	staff-logger	bench/bench.go:335	スコア: 183007
+```
+
+やれてないこととしては、サーバ分ける練習ができてないんだけれど
+データベースの構成とかがわかってれば本当は難しくないはず。
+前回うまくいかなかったのは DNS サーバー考慮できてなかったからじゃないかなぁ。
