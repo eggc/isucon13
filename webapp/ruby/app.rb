@@ -297,9 +297,7 @@ module Isupipe
 
     # top
     get '/api/tag' do
-      tag_models = db_transaction do |tx|
-        tx.query('SELECT * FROM tags')
-      end
+      tag_models = db_conn.query('SELECT * FROM tags')
 
       json(
         tags: tag_models.map { |tag_model|
@@ -357,16 +355,16 @@ module Isupipe
 
       req = decode_request_body(ReserveLivestreamRequest)
 
-      livestream = db_transaction do |tx|
-        # 2023/11/25 10:00からの１年間の期間内であるかチェック
-        term_start_at = Time.utc(2023, 11, 25, 1)
-        term_end_at = Time.utc(2024, 11, 25, 1)
-        reserve_start_at = Time.at(req.start_at, in: 'UTC')
-        reserve_end_at = Time.at(req.end_at, in: 'UTC')
-        if reserve_start_at >= term_end_at || reserve_end_at <= term_start_at
-          raise HttpError.new(400, 'bad reservation time range')
-        end
+      # 2023/11/25 10:00からの１年間の期間内であるかチェック
+      term_start_at = Time.utc(2023, 11, 25, 1)
+      term_end_at = Time.utc(2024, 11, 25, 1)
+      reserve_start_at = Time.at(req.start_at, in: 'UTC')
+      reserve_end_at = Time.at(req.end_at, in: 'UTC')
+      if reserve_start_at >= term_end_at || reserve_end_at <= term_start_at
+        raise HttpError.new(400, 'bad reservation time range')
+      end
 
+      livestream = db_transaction do |tx|
         # 予約枠をみて、予約が可能か調べる
         # NOTE: 並列な予約のoverbooking防止にFOR UPDATEが必要
         tx.xquery('SELECT * FROM reservation_slots WHERE start_at >= ? AND end_at <= ? FOR UPDATE', req.start_at, req.end_at).each do |slot|
@@ -487,10 +485,8 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      db_transaction do |tx|
-        created_at = Time.now.to_i
-        tx.xquery('INSERT INTO livestream_viewers_history (user_id, livestream_id, created_at) VALUES(?, ?, ?)', user_id, livestream_id, created_at)
-      end
+      created_at = Time.now.to_i
+      db_conn.xquery('INSERT INTO livestream_viewers_history (user_id, livestream_id, created_at) VALUES(?, ?, ?)', user_id, livestream_id, created_at)
 
       ''
     end
@@ -509,9 +505,7 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      db_transaction do |tx|
-        tx.xquery('DELETE FROM livestream_viewers_history WHERE user_id = ? AND livestream_id = ?', user_id, livestream_id)
-      end
+      db_conn.xquery('DELETE FROM livestream_viewers_history WHERE user_id = ? AND livestream_id = ?', user_id, livestream_id)
 
       ''
     end
@@ -596,9 +590,7 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      ng_words = db_transaction do |tx|
-        tx.xquery('SELECT * FROM ng_words WHERE user_id = ? AND livestream_id = ? ORDER BY created_at DESC', user_id, livestream_id).to_a
-      end
+      ng_words = db_conn.xquery('SELECT * FROM ng_words WHERE user_id = ? AND livestream_id = ? ORDER BY created_at DESC', user_id, livestream_id).to_a
 
       json(ng_words)
     end
@@ -804,20 +796,18 @@ module Isupipe
     get '/api/user/:username/icon' do
       username = params[:username]
 
-      image = db_transaction do |tx|
-        user = tx.xquery('SELECT * FROM users WHERE name = ?', username).first
-        unless user
-          raise HttpError.new(404, 'not found user that has the given username')
-        end
-
-        icon_hash = user[:icon_hash]
-        if icon_hash && "\"#{icon_hash}\"" == request.env["HTTP_IF_NONE_MATCH"]
-          status 304
-          return body nil
-        end
-
-        tx.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
+      user = db_conn.xquery('SELECT * FROM users WHERE name = ?', username).first
+      unless user
+        raise HttpError.new(404, 'not found user that has the given username')
       end
+
+      icon_hash = user[:icon_hash]
+      if icon_hash && "\"#{icon_hash}\"" == request.env["HTTP_IF_NONE_MATCH"]
+        status 304
+        return body nil
+      end
+
+      image = db_conn.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
 
       content_type 'image/jpeg'
       if image
