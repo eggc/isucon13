@@ -1000,23 +1000,15 @@ module Isupipe
 
         # ランク算出
         users = tx.xquery('SELECT * FROM users').to_a
+        reactions = tx.xquery('SELECT livestreams.user_id, COUNT(reactions.id) AS point_a FROM livestreams INNER JOIN reactions ON reactions.livestream_id = livestreams.id GROUP BY livestreams.user_id;')
+                      .to_h { [_1[:user_id], _1[:point_a]] }
+        tips = tx.xquery('SELECT livestreams.user_id, SUM(livecomments.tip) AS point_b FROM livestreams INNER JOIN livecomments ON livecomments.livestream_id = livestreams.id WHERE livecomments.tip > 0 GROUP BY livestreams.user_id;')
+                 .to_h { [_1[:user_id], _1[:point_b]] }
 
         ranking = users.map do |user|
-          reactions = tx.xquery(<<~SQL, user.fetch(:id), as: :array).first[0]
-            SELECT COUNT(*) FROM users u
-            INNER JOIN livestreams l ON l.user_id = u.id
-            INNER JOIN reactions r ON r.livestream_id = l.id
-            WHERE u.id = ?
-          SQL
-
-          tips = tx.xquery(<<~SQL, user.fetch(:id), as: :array).first[0]
-            SELECT IFNULL(SUM(l2.tip), 0) FROM users u
-            INNER JOIN livestreams l ON l.user_id = u.id
-            INNER JOIN livecomments l2 ON l2.livestream_id = l.id
-            WHERE u.id = ?
-          SQL
-
-          score = reactions + tips
+          a = reactions[user[:id]] || 0
+          b = tips[user[:id]] || 0
+          score = a + b
           UserRankingEntry.new(username: user.fetch(:name), score:)
         end
 
@@ -1025,12 +1017,7 @@ module Isupipe
         rank = ranking.size - ridx
 
         # リアクション数
-        total_reactions = tx.xquery(<<~SQL, username, as: :array).first[0]
-          SELECT COUNT(*) FROM users u
-          INNER JOIN livestreams l ON l.user_id = u.id
-          INNER JOIN reactions r ON r.livestream_id = l.id
-          WHERE u.name = ?
-        SQL
+        total_reactions = reactions[user[:id]]
 
         # ライブコメント数、チップ合計
         total_livecomments = 0
