@@ -739,17 +739,17 @@ module Isupipe
 
       livestream_id = cast_as_integer(params[:livestream_id])
 
-      reactions = db_transaction do |tx|
-        query = 'SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC'
-        limit_str = params[:limit] || ''
-        if limit_str != ''
-          limit = cast_as_integer(limit_str)
-          query = "#{query} LIMIT #{limit}"
-        end
+      tx = db_conn
 
-        reaction_models = tx.xquery(query, livestream_id)
-        fill_reaction_responses(tx, reaction_models)
+      query = 'SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC'
+      limit_str = params[:limit] || ''
+      if limit_str != ''
+        limit = cast_as_integer(limit_str)
+        query = "#{query} LIMIT #{limit}"
       end
+
+      reaction_models = tx.xquery(query, livestream_id)
+      reactions = fill_reaction_responses(tx, reaction_models)
 
       json(reactions)
     end
