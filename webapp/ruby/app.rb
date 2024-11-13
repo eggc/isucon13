@@ -117,9 +117,8 @@ module Isupipe
             INNER JOIN livestream_tags ON livestream_tags.tag_id = tags.id
             WHERE livestream_tags.livestream_id IN(#{livestream_ids});
         SQL
-        tags = tag_models.to_h do
-          [_1[:livestream_id], _1.slice(:id, :name)]
-        end
+        tags = tag_models.group_by { _1[:livestream_id] }
+        tags.transform_values! { |value| value.map { |hash| hash.slice(:id, :name) } }
 
         livestream_models.map do |livestream_model|
           livestream_id = livestream_model[:id]
