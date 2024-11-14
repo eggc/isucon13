@@ -1432,3 +1432,130 @@ powerdns のログも切ってみるか。ほんの少しスコアが増えた�
 ```
 
 意外と簡単だったけど3台構成にする場合は注意が必要かもしれない。
+TTL を80秒に設定してベンチマーク2回目の時に落ちないようにする。
+この変更後も COMMIT が一番コストが高い。
+
+```
+# Profile
+# Rank Query ID                     Response time  Calls  R/Call V/M   Ite
+# ==== ============================ ============== ====== ====== ===== ===
+#    1 0xFFFCA4D67EA0A788813031B... 190.9241 60.8%  37381 0.0051  0.00 COMMIT
+```
+
+あ、でも initialize の時にこれを実行してるのかもしれないし、そんなに気にしなくていいんじゃないか。
+
+## user も全てメモリに載せられないか
+
+一応データ量を確認する
+
+```sql
+SELECT
+    table_schema AS 'Database',
+    table_name AS 'Table',
+    ROUND(data_length / 1024 / 1024, 2) AS 'Data Size (MB)',
+    ROUND(index_length / 1024 / 1024, 2) AS 'Index Size (MB)',
+    ROUND((data_length + index_length) / 1024 / 1024, 2) AS 'Total Size (MB)'
+FROM
+    information_schema.TABLES
+WHERE
+    table_schema = 'isupipe'
+ORDER BY
+    (data_length + index_length) DESC;
+```
+
+```
++----------+----------------------------+----------------+-----------------+-----------------+
+| Database | Table                      | Data Size (MB) | Index Size (MB) | Total Size (MB) |
++----------+----------------------------+----------------+-----------------+-----------------+
+| isupipe  | ng_words                   |           1.52 |            3.03 |            4.55 |
+| isupipe  | livestreams                |           3.52 |            0.30 |            3.81 |
+| isupipe  | livecomments               |           2.52 |            0.48 |            3.00 |
+| isupipe  | reactions                  |           1.52 |            0.42 |            1.94 |
+| isupipe  | livestream_tags            |           1.52 |            0.38 |            1.89 |
+| isupipe  | users                      |           1.52 |            0.14 |            1.66 |
+| isupipe  | reservation_slots          |           0.48 |            0.28 |            0.77 |
+| isupipe  | themes                     |           0.14 |            0.09 |            0.23 |
+| isupipe  | icons                      |           0.02 |            0.02 |            0.03 |
+| isupipe  | tags                       |           0.02 |            0.02 |            0.03 |
+| isupipe  | livecomment_reports        |           0.02 |            0.00 |            0.02 |
+| isupipe  | livestream_viewers_history |           0.02 |            0.00 |            0.02 |
++----------+----------------------------+----------------+-----------------+-----------------+
+```
+
+メモリは5Gあって余ってるからありな気がする。やってみようか。
+あまり効果はなかったので反映しないことにした。
+user のオブジェクト丸ごと格納するようなキャッシュの仕方ではほとんど効果がないようだ。
+
+## dnsdist を入れてみる
+
+まずは pdns のポートを 5300 にかえる
+
+sudo vim /etc/powerdns/pdns.conf
+sudo systemctl restart pdns
+
+dnsdist を設定する
+
+sudo apt install dnsdist
+sudo vim /etc/dnsdist/dnsdist.conf
+
+```
+newServer({address="127.0.0.1:5300"})
+```
+
+sudo systemctl start dnsdist
+sudo systemctl enable dnsdist
+
+名前解決ができるか確認する
+
+```
+dig isato4.u.isucon.local @127.0.0.1
+```
+
+status: NOERROR で問題なさそう。わざと変な名前解決できないものを送る。
+
+```
+dig hogehogeisato4.u.isucon.local @127.0.0.1
+```
+
+status: NXDOMAIN となった。
+下記でドロップさせれるらしいので設定に追加。
+ChatGPT や下記のサイトを参考にした。
+https://kazeburo.hatenablog.com/entry/2023/12/02/235258
+
+
+```
+addResponseAction(
+  RCodeRule(DNSRCode.NXDOMAIN),
+  DelayResponseAction(3000)
+)
+```
+
+ダメだった。どう直すかもよくわからないので別の記事を参考にしてみる。
+確かに遅延が入るようになった。大きくスコアが改善。
+
+```
+2024-11-14T12:32:50.707Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.883861838s
+2024-11-14T12:32:50.707Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-14T12:32:50.707Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-14T12:32:50.707Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-14T12:32:50.707Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-14T12:32:50.707Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-14T12:32:50.709Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-14T12:32:50.709Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-14T12:32:50.709Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 1079}
+2024-11-14T12:32:50.709Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 2524 回成功, 29 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 1764 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1652 回成功, 29 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 58 回成功, 1 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 2489 回成功, 66 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 1079 回成功
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 29 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 1764 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 29 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 66 回失敗
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 9
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 14838
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 121
+2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:335	スコア: 208231
+```
