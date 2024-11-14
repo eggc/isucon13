@@ -9,6 +9,7 @@ require 'open3'
 require 'securerandom'
 require 'sinatra/base'
 require 'sinatra/json'
+require 'dalli'
 
 module Isupipe
   class App < Sinatra::Base
@@ -39,6 +40,10 @@ module Isupipe
     end
 
     helpers do
+      def dc
+        Thread.current[:dc] ||= Dalli::Client.new
+      end
+
       def db_conn
         Thread.current[:db_conn] ||= connect_db
       end
@@ -803,11 +808,11 @@ module Isupipe
         return body nil
       end
 
-      image = db_conn.xquery('SELECT image FROM icons WHERE user_id = ?', user.fetch(:id)).first
+      image = dc.get(user.fetch(:id))
 
       content_type 'image/jpeg'
       if image
-        image[:image]
+        image
       else
         send_file FALLBACK_IMAGE
       end
@@ -831,16 +836,14 @@ module Isupipe
       image = Base64.decode64(req.image)
       icon_hash = Digest::SHA256.hexdigest(image)
 
-      icon_id = db_transaction do |tx|
-        tx.xquery('DELETE FROM icons WHERE user_id = ?', user_id)
+      db_transaction do |tx|
         tx.xquery('UPDATE users SET icon_hash = ? WHERE id = ?', icon_hash, user_id)
-        tx.xquery('INSERT INTO icons (user_id, image) VALUES (?, ?)', user_id, image)
-        tx.last_id
+        dc.set(user_id, image)
       end
 
       status 201
       json(
-        id: icon_id,
+        id: user_id,
       )
     end
 

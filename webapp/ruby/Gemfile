@@ -8,6 +8,7 @@ gem 'mysql2-cs-bind'
 gem 'puma'
 gem 'sinatra'
 gem 'sinatra-contrib'
+gem 'dalli'
 
 # debug
 gem 'dotenv'
