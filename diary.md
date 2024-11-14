@@ -1273,7 +1273,7 @@ https://isucon.net/archives/58001272.html
 - DNSサーバを実装し、ユーザ名がDBになければゆっくりレスポンスをする、あるいはレスポンスをしない
 - dnsdist を導入し、NXDOMAIN(名前が見つからない場合)にゆっくりレスポンスをする、あるいはレスポンスをしないフィルタを導入する
 
-TTL を増やしてみよう。
+## powerDNS の TTL を増やす
 
 cat /etc/powerdns/pdns.conf
 
@@ -1339,6 +1339,8 @@ sudo systemctl restart pdns
 
 DNS サーバー実装するのは無理だなぁ。後は nginx, mysql, sinatra のログ切って終了でいいかな。
 
+## ログを無効化する
+
 ```
 2024-11-13T16:06:19.595Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.961817196s
 2024-11-13T16:06:19.595Z	info	isupipe-benchmarker	ベンチマーク走行終了
@@ -1395,3 +1397,38 @@ powerdns のログも切ってみるか。ほんの少しスコアが増えた�
 やれてないこととしては、サーバ分ける練習ができてないんだけれど
 データベースの構成とかがわかってれば本当は難しくないはず。
 前回うまくいかなかったのは DNS サーバー考慮できてなかったからじゃないかなぁ。
+
+## icons を全てメモリに載せる
+
+ふと思いついて icons を全て memcached に載せて mysql をやめたらスコアが上がった。
+
+```
+2024-11-14T01:36:59.183Z	info	staff-logger	bench/bench.go:260	ベンチマーク走行時間: 1m0.809573607s
+2024-11-14T01:36:59.183Z	info	isupipe-benchmarker	ベンチマーク走行終了
+2024-11-14T01:36:59.183Z	info	isupipe-benchmarker	最終チェックを実施します
+2024-11-14T01:36:59.183Z	info	isupipe-benchmarker	最終チェックが成功しました
+2024-11-14T01:36:59.183Z	info	isupipe-benchmarker	重複排除したログを以下に出力します
+2024-11-14T01:36:59.183Z	info	staff-logger	bench/bench.go:277	ベンチエラーを収集します
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:285	内部エラーを収集します
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:301	シナリオカウンタを出力します
+2024-11-14T01:36:59.184Z	info	isupipe-benchmarker	配信を最後まで視聴できた視聴者数	{"viewers": 987}
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ aggressive-streamer-moderate] 2381 回成功, 28 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ dns-watertorture-attack] 1850 回成功
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-cold-reserve] 1372 回成功, 1576 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ streamer-moderate] 1538 回成功, 12 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-report] 58 回成功, 1 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer-spam] 2348 回成功, 61 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[シナリオ viewer] 987 回成功, 10 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ aggressive-streamer-moderate-fail] 28 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-cold-reserve-fail] 1576 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ streamer-moderate-fail] 12 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-fail] 10 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-report-fail] 1 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:323	[失敗シナリオ viewer-spam-fail] 61 回失敗
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:329	DNSAttacker並列数: 15
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:330	名前解決成功数: 189881
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 1
+2024-11-14T01:36:59.184Z	info	staff-logger	bench/bench.go:335	スコア: 195727
+```
+
+意外と簡単だったけど3台構成にする場合は注意が必要かもしれない。
