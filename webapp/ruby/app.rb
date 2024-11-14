@@ -41,7 +41,7 @@ module Isupipe
 
     helpers do
       def dc
-        Thread.current[:dc] ||= Dalli::Client.new
+        Thread.current[:dc] ||= Dalli::Client.new('localhost', { expires_in: 80 })
       end
 
       def db_conn
