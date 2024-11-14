@@ -1,0 +1,9 @@
+2024-11-14T01:28:09.081Z	info	staff-logger	bench/bench.go:172	SSL接続が有効になっています
+2024-11-14T01:28:09.081Z	info	isupipe-benchmarker	SSL接続が有効になっています
+2024-11-14T01:28:09.081Z	info	staff-logger	bench/bench.go:193	webapp: https://pipe.u.isucon.local:443
+2024-11-14T01:28:09.081Z	info	staff-logger	bench/bench.go:194	nameserver: 127.0.0.1:53
+2024-11-14T01:28:09.081Z	info	isupipe-benchmarker	静的ファイルチェックを行います
+2024-11-14T01:28:09.081Z	info	isupipe-benchmarker	静的ファイルチェックが完了しました
+2024-11-14T01:28:09.081Z	info	isupipe-benchmarker	webappの初期化を行います
+2024-11-14T01:28:12.289Z	info	isupipe-benchmarker	ベンチマーク走行前のデータ整合性チェックを行います
+{"pass":false,"score":0,"messages":["整合性チェックに失敗しました","benchmark-application: [一般エラー] GET /api/user/test001/icon へのリクエストに対して、期待されたHTTPステータスコードが確認できませんでした (expected:200, actual:500)","[一般エラー] GET /api/user/test001/icon へのリクエストに対して、期待されたHTTPステータスコードが確認できませんでした (expected:200, actual:500)"],"language":"ruby","resolved_count":0}
