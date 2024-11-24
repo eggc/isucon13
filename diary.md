@@ -116,7 +116,11 @@ dig isato4.u.isucon.local @127.0.0.1
 
 ## MySQL の動作確認
 
-sudo mysql だけでいいらしい。確かにアクセスできた。どういう設定でそうなってるのかはよくわからなかったが root でログインしたことになってた。初期化のエンドポイントは下記。
+sudo mysql だけでいいらしい。確かにアクセスできた。
+これは root ユーザかつソケット接続になるらしい。ソケット接続だけ許可してて TCP 接続だとダメらしい。
+sudo mysql --protocol=tcp だと失敗する。
+
+初期化のエンドポイントは下記。
 
 /api/initialize
 
@@ -1559,3 +1563,127 @@ addResponseAction(
 2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:331	名前解決失敗数: 121
 2024-11-14T12:32:50.710Z	info	staff-logger	bench/bench.go:335	スコア: 208231
 ```
+
+## やらなかったこと
+
+nginx-puma も puma-mysql も TCP 接続を前提に作っているけど unix ソケットにすると高速化する可能性があった。
+その場合は複数台構成にはできなくなるけど仮想マシン上で高いスコアを出すならやってみてもよかったかもしれない。
+
+tag は新規追加も更新もできないので定数化するという手段もあったらしい。
+結構 INNER JOIN で書き直してしまっているので今更それをやるのはちょっとしんどいかなぁ。
+
+JSON シリアライザを oj に変えると早くなるという話もあった。
+ただ、ここ数年でデフォルトライブラリもかなり高速化されたらしく oj を使っても対してスコアが変わらなかった。
+
+画像の配信で使っている send_file を使うよりは nginx でファイル配信をした方が早いらしい。
+そういう作戦で行くならアップロードされたファイルは public/api/user/xxxxxx/icon というディレクトリに配置して
+nginx でそのまま配信できるようにしたら性能が上がったかもしれない。
+ただ今回は 304 を返すのに特別なヘッダーを使った実装をしてるからそこまでやっても効果は出ないだろう。
+
+estackprof を入れてみたが、どうも期待した動作をしてなかったのですぐ消した。
+そもそも stackprof が middleware 対応してるので継続的にメンテナンスされてるそっちの方をインストールした方がよさそう。
+
+# 6️⃣ mysql 専用サーバに隔離する
+
+ISUCON ではインストール済みだけど、とりあえず自前で入れてみる。
+
+```sh
+# インストール
+sudo apt install mysql-server-8.0
+sudo systemctl start mysql.service
+sudo systemctl enable mysql.service
+
+# ログインできることを確認
+sudo mysql
+```
+
+isucon ユーザを作り TCP 接続を許可する
+
+```sql
+CREATE DATABASE IF NOT EXISTS `isupipe`;
+CREATE USER isucon IDENTIFIED BY 'isucon';
+GRANT ALL PRIVILEGES ON isupipe.* TO 'isucon'@'%';
+ALTER USER 'isucon'@'%' IDENTIFIED BY 'isucon';
+```
+
+これで TCP で入れるようになった。
+
+```
+mysql -uisucon -pisucon isupipe
+```
+
+と思ったら まだ localhost からの接続しか許可してないので外からはさわれない。
+
+```
+sudo ss -tuln | grep 3306
+tcp   LISTEN 0      151              127.0.0.1:3306       0.0.0.0:*
+tcp   LISTEN 0      70               127.0.0.1:33060      0.0.0.0:*
+```
+
+/etc/mysql/mysql.conf.d/mysqld.cnf をいじる。
+
+```
+bind-address = 0.0.0.0
+```
+
+セキュリティ大丈夫かと思ったけど、この bind-address は一個しか指定できないのでユーザごとのホスト制限を使うのがいいようだ。
+Sequel Ace でもアクセスできるのを確認する。
+
+| key      | value                |
+|----------|----------------------|
+| user     | isucon               |
+| password | isucon               |
+| host     | isucon13v2.orb.local |
+
+OK。isucon13 から isucon13v2 のテーブルを初期化してみよう。
+env.sh を開いて、ユーザ名やパスワードは揃えてるので下記の行だけ変更。
+
+```
+ISUCON13_MYSQL_DIALCONFIG_ADDRESS="isucon13v2.orb.local"
+```
+
+ベンチマークを走らせてみた。あっさり成功。
+
+# アプリケーションサーバーを分ける
+
+今の構成を確認してみる。
+isupipe-ruby は 8080 でアクセス受け付けるようになってる。
+
+```
+ExecStart=/home/isucon/.x bundle exec puma --bind tcp://0.0.0.0:8080 --workers 8 --threads 0:8 --environment production
+```
+
+実際、nginx を停止させて下記のコマンドを叩くと結果が得られる。
+
+curl http://localhost:8080/api/tag
+
+ポートを確認してみる。
+
+```
+ss -tuln | grep 8080
+
+tcp   LISTEN 0      1024              0.0.0.0:8080       0.0.0.0:*
+```
+
+となっているので、外から触れるっぽい。ホストOS から実行してみたらちゃんと動いた。
+
+```
+curl http://isucon13.orb.local:8080/api/tag
+```
+
+なのでサーバー構成としては下記のような感じがよさそう
+
+1. nginx + puma
+2. mysql
+3. memcached + puma
+
+nginx は下記のプロキシで http(s) のリクエストを 8080 に誘導するようになってる。
+
+```
+  location /api {
+    proxy_set_header Host $host;
+    proxy_pass http://localhost:8080;
+  }
+```
+
+うーんしかし、本当はソケット接続の方がいいのかな。
